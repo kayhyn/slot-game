@@ -1,23 +1,25 @@
-const MAX_PARTICLES = 96;
+const MAX_PARTICLES = 160;
 
 export class Sparkles {
   constructor() {
     this.particles = [];
   }
 
-  burst(x, y, count = 24) {
+  burst(x, y, count = 24, intense = false) {
     const room = MAX_PARTICLES - this.particles.length;
     count = Math.min(count, Math.max(0, room));
     for (let i = 0; i < count; i++) {
       const angle = Math.random() * Math.PI * 2;
-      const speed = 90 + Math.random() * 180;
+      const speed = intense
+        ? 160 + Math.random() * 280
+        : 90 + Math.random() * 180;
       this.particles.push({
         x,
         y,
         vx: Math.cos(angle) * speed,
-        vy: Math.sin(angle) * speed - 50,
-        size: 2 + Math.random() * 3,
-        life: 0.45 + Math.random() * 0.35,
+        vy: Math.sin(angle) * speed - (intense ? 80 : 50),
+        size: intense ? 3 + Math.random() * 5 : 2 + Math.random() * 3,
+        life: intense ? 0.7 + Math.random() * 0.5 : 0.45 + Math.random() * 0.35,
         age: 0,
       });
     }

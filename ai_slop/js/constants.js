@@ -6,7 +6,8 @@ export const JUMP_VELOCITY = -760;  // initial jump speed (px/s), tuned to clear
 export const SCROLL_SPEED_BASE = 36;  // starting scroll (px/s)
 export const SCROLL_SPEED_MAX = 88;   // scroll cap at high score (px/s)
 export const MOVE_SPEED = 220;        // player run speed (px/s), faster than scroll
-export const SPEED_RAMP_SCORE = 30;   // match points to reach max speed
+export const SPEED_RAMP_SCORE = 500;   // dollars to reach max speed
+export const SPEED_RAMP_SMOOTH = 1.4; // how quickly scroll/spin catch up to score (1/s)
 
 // Per-wheel spin: each reel picks a random speed in this range and a random
 // direction. Negative direction means the symbols roll upward (backwards).
@@ -27,8 +28,10 @@ export const SYMBOL_SIZE = 96;      // size of a symbol tile
 export const SYMBOL_SPACING = 130;  // vertical distance between symbols on a reel
 export const NUM_SLOTS = 14;        // symbols per reel strip before it loops
 
-// Scoring — points awarded only for 3+ symbol matches in the golden zone
-export const MATCH_BONUS = 100;     // points per symbol in a matching run
+// Scoring — dollars; symbol multipliers defined on each symbol in wheel.js
+export const STARTING_MONEY = 100;
+export const MIN_WAGER = 10;
+export const WAGER_STEP = 10;
 export const MATCH_GLOW_DURATION = 0.85; // seconds of match glow on symbols
 
 // Column hold: reel spin deceleration (px/s^2) when player presses H

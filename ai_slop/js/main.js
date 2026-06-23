@@ -5,16 +5,48 @@ import {
   REEL_BUFFER_SLOTS,
   SYMBOL_SPACING,
   SYMBOL_SIZE,
-  MATCH_BONUS,
+  STARTING_MONEY,
+  MIN_WAGER,
+  WAGER_STEP,
   SPIN_SPEED_MAX,
+  SCROLL_SPEED_BASE,
+  SPIN_MULT_BASE,
+  SPEED_RAMP_SMOOTH,
   difficulty,
 } from "./constants.js";
-import { Player } from "./player.js";
-import { Wheel, resetWheelIds } from "./wheel.js";
-import { consumeJump, consumeHold, getMoveAxis } from "./input.js";
+import { Player, loadPlayerSprite, applyPlayerSprite } from "./player.js";
+import {
+  Wheel,
+  resetWheelIds,
+  loadSymbolTiles,
+  drawColumnDividers,
+  getSymbolMultiplier,
+  isJackpotSymbol,
+} from "./wheel.js";
+import {
+  consumeJump,
+  consumeHold,
+  consumeEscape,
+  consumePointer,
+  consumeConfirm,
+  consumeWagerUp,
+  consumeWagerDown,
+  getPointerHover,
+  clearJump,
+  getMoveAxis,
+  initInput,
+} from "./input.js";
 import { Confetti } from "./confetti.js";
 import { Sparkles } from "./sparkles.js";
-import { initAudio, playSound } from "./audio.js";
+import { initAudio, playSound, startBgm, stopBgm } from "./audio.js";
+import {
+  drawTitleScreen,
+  drawCreditsScreen,
+  hitTestTitleScreen,
+  hitTestCreditsScreen,
+  hoverTitleScreen,
+  hoverCreditsScreen,
+} from "./menu.js";
 
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
@@ -23,10 +55,15 @@ const player = new Player();
 const confetti = new Confetti();
 const sparkles = new Sparkles();
 let wheels = [];
-let state = "playing"; // "playing" | "over"
-let score = 0;
+let state = "menu"; // "menu" | "credits" | "playing" | "over"
+let score = STARTING_MONEY;
+let wager = MIN_WAGER;
 let lastTime = 0;
 const awardedMatches = new Set();
+const matchedWheelIds = new Set();
+let firstDepartureFree = true;
+let smoothedScroll = SCROLL_SPEED_BASE;
+let smoothedSpinMult = SPIN_MULT_BASE;
 
 const STEP = REEL_WIDTH + REEL_GAP;
 const REEL_STRIP_BUFFER = REEL_BUFFER_SLOTS * SYMBOL_SPACING;
@@ -37,10 +74,11 @@ function wheelUnderPlayer() {
 }
 
 function processFrozenMatches(stripTop, zoneTop, zoneBottom) {
+  const pending = wheels.some((w) => w.pendingMatchCheck);
   for (const w of wheels) {
     if (w.pendingMatchCheck) w.pendingMatchCheck = false;
   }
-  if (wheels.filter((w) => w.frozen).length >= 3) {
+  if (pending) {
     checkMatches(stripTop, zoneTop, zoneBottom);
   }
 }
@@ -59,31 +97,86 @@ function reelWindow() {
   };
 }
 
+function updateSmoothedDifficulty(dt) {
+  const target = difficulty(score);
+  const k = 1 - Math.exp(-SPEED_RAMP_SMOOTH * dt);
+  smoothedScroll += (target.scroll - smoothedScroll) * k;
+  smoothedSpinMult += (target.spinMult - smoothedSpinMult) * k;
+}
+
 function buildWheels() {
   wheels = [];
-  const { spinMult } = difficulty(score);
   let firstX = canvas.width / 2 - REEL_WIDTH / 2;
   while (firstX > -STEP) firstX -= STEP;
   for (let x = firstX; x < canvas.width + STEP * 2; x += STEP) {
-    wheels.push(new Wheel(x, spinMult));
+    wheels.push(new Wheel(x, smoothedSpinMult));
   }
+}
+
+function formatMoney(amount) {
+  return `$${amount}`;
+}
+
+function clampWager() {
+  wager = Math.max(MIN_WAGER, Math.min(score, wager));
+}
+
+function checkBroke() {
+  if (score < MIN_WAGER) {
+    score = Math.max(0, score);
+    state = "over";
+    stopBgm();
+    playSound("death");
+    return true;
+  }
+  return false;
+}
+
+function loseMoney(amount) {
+  score -= amount;
+  playSound("fail");
+  clampWager();
+  checkBroke();
+}
+
+function adjustWager(delta) {
+  wager = Math.max(MIN_WAGER, Math.min(score, wager + delta));
 }
 
 function resetGame() {
   resetWheelIds();
+  score = STARTING_MONEY;
+  wager = MIN_WAGER;
+  smoothedScroll = SCROLL_SPEED_BASE;
+  smoothedSpinMult = SPIN_MULT_BASE;
   buildWheels();
   player.reset(canvas.width, canvas.height);
   confetti.particles = [];
   sparkles.particles = [];
   awardedMatches.clear();
+  matchedWheelIds.clear();
+  firstDepartureFree = true;
+}
+
+function startPlaying() {
+  resetGame();
   state = "playing";
-  score = 0;
+  playSound("start");
+  startBgm();
+}
+
+function goToMenu() {
+  state = "menu";
+  wheels = [];
+  stopBgm();
 }
 
 function resize() {
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight;
-  resetGame();
+  if (state === "playing" || state === "over") {
+    resetGame();
+  }
 }
 
 function recycleWheels() {
@@ -92,12 +185,18 @@ function recycleWheels() {
     wheels[0].x + REEL_WIDTH < 0 &&
     !wheels[0].stopping
   ) {
+    const departing = wheels[0];
+    if (!matchedWheelIds.has(departing.id) && !firstDepartureFree) {
+      loseMoney(wager);
+      if (state === "over") return;
+    }
+    firstDepartureFree = false;
     wheels.shift();
   }
+  if (!wheels.length) return;
   let last = wheels[wheels.length - 1];
-  const { spinMult } = difficulty(score);
   while (last.x < canvas.width + STEP) {
-    last = new Wheel(last.x + STEP, spinMult);
+    last = new Wheel(last.x + STEP, smoothedSpinMult);
     wheels.push(last);
   }
 }
@@ -106,14 +205,25 @@ function wheelsAdjacent(a, b) {
   return Math.abs(Math.abs(b.x - a.x) - STEP) < 5;
 }
 
+function runLengthMultiplier(length) {
+  return length - 2; // 3→1×, 4→2×, 5→3× on the symbol multiplier
+}
+
 function awardRun(run, stripTop) {
   const key = run.map((e) => e.w.id).join("-");
   if (awardedMatches.has(key)) return;
   awardedMatches.add(key);
-  score += MATCH_BONUS * run.length;
+
+  const sym = run[0].w.slots[run[0].slot];
+  const effectiveMult = getSymbolMultiplier(sym) * runLengthMultiplier(run.length);
+  score += wager * effectiveMult * run.length;
+  clampWager();
+
+  const jackpot = isJackpotSymbol(sym);
   let cx = 0;
   let cy = 0;
   for (const { w, slot } of run) {
+    matchedWheelIds.add(w.id);
     w.triggerMatchGlow(slot);
     const c = w.symbolCenter(stripTop, slot);
     cx += c.x;
@@ -123,6 +233,10 @@ function awardRun(run, stripTop) {
   cy /= run.length;
   sparkles.burst(cx, cy, 28);
   playSound("jackpot");
+  if (jackpot) {
+    sparkles.burst(cx, cy, 80, true);
+    playSound("diamond");
+  }
 }
 
 function checkMatches(stripTop, zoneTop, zoneBottom, { award = true } = {}) {
@@ -155,15 +269,74 @@ function checkMatches(stripTop, zoneTop, zoneBottom, { award = true } = {}) {
   }
 }
 
+function handleMenuPointer() {
+  const p = consumePointer();
+  if (!p) return;
+
+  if (state === "menu") {
+    const hit = hitTestTitleScreen(canvas.width, canvas.height, p.x, p.y);
+    if (hit === "play") {
+      clearJump();
+      startPlaying();
+    } else if (hit === "credits") {
+      state = "credits";
+    }
+    return;
+  }
+
+  if (state === "credits") {
+    if (hitTestCreditsScreen(canvas.width, canvas.height, p.x, p.y) === "back") {
+      state = "menu";
+    }
+  }
+}
+
+function updateMenu() {
+  if (consumeEscape()) {
+    if (state === "credits") state = "menu";
+    else if (state === "playing" || state === "over") goToMenu();
+    return;
+  }
+
+  if (state === "menu" && consumeConfirm()) {
+    startPlaying();
+    return;
+  }
+
+  if (state === "credits" && consumeConfirm()) {
+    state = "menu";
+    return;
+  }
+
+  handleMenuPointer();
+}
+
 function update(dt) {
+  if (state === "menu" || state === "credits") {
+    updateMenu();
+    return;
+  }
+
   if (state === "over") {
-    if (consumeJump()) resetGame();
+    if (consumeEscape()) {
+      goToMenu();
+      return;
+    }
+    if (consumeJump()) startPlaying();
+    return;
+  }
+
+  if (consumeEscape()) {
+    goToMenu();
     return;
   }
 
   const { top, bottom, stripTop, middleTop, zoneBottom } = reelWindow();
 
-  if (consumeJump()) player.jump();
+  if (consumeJump() && player.jump()) playSound("grunt");
+
+  if (consumeWagerUp()) adjustWager(WAGER_STEP);
+  if (consumeWagerDown()) adjustWager(-WAGER_STEP);
 
   if (consumeHold()) {
     playSound("button");
@@ -175,9 +348,9 @@ function update(dt) {
     }
   }
 
-  const diff = difficulty(score);
-  for (const w of wheels) w.refreshSpinMult(diff.spinMult);
-  for (const w of wheels) w.update(dt, diff.scroll);
+  updateSmoothedDifficulty(dt);
+  for (const w of wheels) w.refreshSpinMult(smoothedSpinMult);
+  for (const w of wheels) w.update(dt, smoothedScroll);
   recycleWheels();
   processFrozenMatches(stripTop, middleTop, zoneBottom);
 
@@ -186,14 +359,17 @@ function update(dt) {
     for (const p of w.getPlatforms(top, bottom, stripTop)) platforms.push(p);
   }
 
-  const maxSpinSpeed = SPIN_SPEED_MAX * diff.spinMult;
-  player.update(dt, platforms, getMoveAxis(), diff.scroll, maxSpinSpeed);
+  const maxSpinSpeed = SPIN_SPEED_MAX * smoothedSpinMult;
+  player.update(dt, platforms, getMoveAxis(), smoothedScroll, maxSpinSpeed);
+  if (player.justLanded) playSound("land");
 
   confetti.update(dt);
   sparkles.update(dt);
 
-  if (player.isOffScreen(canvas.height, top)) {
+  if (state !== "over" && player.isOffScreen(canvas.height, top)) {
     state = "over";
+    stopBgm();
+    playSound("death");
   }
 }
 
@@ -210,6 +386,24 @@ function drawMatchGlows(stripTop) {
 }
 
 function draw() {
+  if (state === "menu") {
+    const hover = getPointerHover();
+    const hoverId = hover
+      ? hoverTitleScreen(canvas.width, canvas.height, hover.x, hover.y)
+      : null;
+    drawTitleScreen(ctx, canvas.width, canvas.height, hoverId);
+    return;
+  }
+
+  if (state === "credits") {
+    const hover = getPointerHover();
+    const hoverId = hover
+      ? hoverCreditsScreen(canvas.width, canvas.height, hover.x, hover.y)
+      : null;
+    drawCreditsScreen(ctx, canvas.width, canvas.height, hoverId);
+    return;
+  }
+
   // Background
   const bg = ctx.createLinearGradient(0, 0, 0, canvas.height);
   bg.addColorStop(0, "#0f172a");
@@ -222,6 +416,7 @@ function draw() {
     w.draw(ctx, top, bottom, stripTop, stripBottom, middleTop, zoneBottom);
   }
 
+  drawColumnDividers(ctx, wheels, top, bottom, canvas.width);
   drawMiddleRowHighlight(middleTop);
   drawMatchGlows(stripTop);
   player.draw(ctx);
@@ -233,10 +428,13 @@ function draw() {
   ctx.textAlign = "left";
   ctx.textBaseline = "top";
   ctx.font = "bold 22px system-ui, sans-serif";
-  ctx.fillText(`Score ${score}`, 20, 18);
+  ctx.fillText(formatMoney(score), 20, 18);
+  ctx.textAlign = "right";
+  ctx.fillText(`Wager ${formatMoney(wager)}`, canvas.width - 20, 18);
+  ctx.textAlign = "left";
   ctx.font = "15px system-ui, sans-serif";
   ctx.fillStyle = "rgba(255,255,255,0.45)";
-  ctx.fillText("← → / A D move   H hold/toggle reel   Space jump", 20, 48);
+  ctx.fillText("← → / A D move   ↑ ↓ / L M wager   H / Enter hold   Space jump", 20, 48);
 
   if (state === "over") {
     ctx.fillStyle = "rgba(0,0,0,0.6)";
@@ -248,10 +446,13 @@ function draw() {
     ctx.fillText("GAME OVER", canvas.width / 2, canvas.height / 2 - 30);
     ctx.font = "24px system-ui, sans-serif";
     ctx.fillText(
-      `Score ${score} — press Space / tap to retry`,
+      `${formatMoney(score)} — press Space / tap to retry`,
       canvas.width / 2,
       canvas.height / 2 + 30,
     );
+    ctx.font = "16px system-ui, sans-serif";
+    ctx.fillStyle = "rgba(248, 250, 252, 0.45)";
+    ctx.fillText("Escape — main menu", canvas.width / 2, canvas.height / 2 + 68);
   }
 }
 
@@ -265,7 +466,26 @@ function loop(timestamp) {
   requestAnimationFrame(loop);
 }
 
-window.addEventListener("resize", resize);
+window.addEventListener("resize", () => {
+  if (ready) resize();
+});
+
 initAudio();
-resize();
-requestAnimationFrame(loop);
+initInput(canvas);
+
+let ready = false;
+
+Promise.all([loadSymbolTiles(), loadPlayerSprite()])
+  .then(() => {
+    applyPlayerSprite(player);
+    ready = true;
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    requestAnimationFrame(loop);
+  })
+  .catch((err) => {
+    console.error(err);
+    ctx.fillStyle = "#f8fafc";
+    ctx.font = "18px system-ui, sans-serif";
+    ctx.fillText("Failed to load symbol images.", 20, 40);
+  });

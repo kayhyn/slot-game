@@ -1,0 +1,9 @@
+{
+  "scripts": {
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "javascript-obfuscator": "^5.4.3",
+    "vite": "^8.1.0"
+  }
+}
